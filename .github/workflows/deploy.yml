@@ -87,5 +87,5 @@ jobs:
           script: |
             cd /opt/memwords
             docker compose -f docker-compose.prod.yml pull memwords-api
-            docker compose -f docker-compose.prod.yml up -d memwords-api
+            docker compose -f docker-compose.prod.yml up -d --no-deps memwords-api
             docker image prune -f
