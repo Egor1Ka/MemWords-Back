@@ -1,0 +1,14 @@
+# dependencies
+/node_modules
+
+# env (never commit real env files)
+.env
+.env.*
+!.env.example
+
+# logs / misc
+*.log
+newrelic_agent.log
+.DS_Store
+/.omc
+/coverage

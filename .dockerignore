@@ -1,0 +1,13 @@
+node_modules
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+README.md
+.DS_Store
+.omc
+*.log
+.github
