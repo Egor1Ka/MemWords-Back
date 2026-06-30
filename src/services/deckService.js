@@ -1,6 +1,8 @@
 import * as deckRepository from '../repository/deck.js';
 import * as deckCardRepository from '../repository/deckCard.js';
-import { toDeckDTO } from '../dto/deckDto.js';
+import * as deckSubscriptionRepository from '../repository/deckSubscription.js';
+import * as userRepository from '../repository/user.js';
+import { toDeckDTO, toExploreDeckDTO, toSavedDeckDTO } from '../dto/deckDto.js';
 import { DECK_VISIBILITIES } from '../models/Deck.js';
 import { DomainError } from '../utils/http/httpError.js';
 import { httpStatus } from '../utils/http/httpStatus.js';
@@ -89,11 +91,28 @@ export async function listDecks(authUser) {
   return Promise.all(decks.map(withCardCount));
 }
 
+const resolveOwnerName = async (ownerId) => {
+  const owner = await userRepository.findById(ownerId);
+  return owner ? owner.name : null;
+};
+
+const resolveIsSubscribed = async (authUser, ownerFlag, deckId) => {
+  if (!authUser || !authUser.id || ownerFlag) return false;
+  return deckSubscriptionRepository.exists({ userId: authUser.id, deckId });
+};
+
 export async function getDeck(authUser, deckId) {
   assertObjectId(deckId, 'deckId');
   const deck = await loadDeckOr404(deckId);
   assertCanAccessDeck(deck, authUser);
-  return withCardCount(deck);
+
+  const base = await withCardCount(deck);
+  const ownerFlag = isOwner(deck, authUser);
+  const [ownerName, isSubscribed] = await Promise.all([
+    resolveOwnerName(deck.owner),
+    resolveIsSubscribed(authUser, ownerFlag, deckId),
+  ]);
+  return { ...base, isOwner: ownerFlag, ownerName, isSubscribed };
 }
 
 const ALLOWED_UPDATE_KEYS = ['name', 'description', 'visibility'];
@@ -136,6 +155,121 @@ export async function deleteDeck(authUser, deckId) {
   assertDeckOwner(deck, authUser);
 
   const removedLinks = await deckCardRepository.deleteManyByDeck(deckId);
+  await deckSubscriptionRepository.deleteManyByDeck(deckId);
   await deckRepository.deleteById(deckId);
   return { id: deckId, removedLinks };
+}
+
+// ── Discovery / subscriptions ───────────────────────────────────────────────
+
+const EXPLORE_SORTS = ['new', 'popular', 'name'];
+const DEFAULT_PAGE_SIZE = 24;
+const MAX_PAGE_SIZE = 50;
+const MAX_QUERY_LENGTH = 100;
+
+const parsePage = (raw) => {
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 1) return 1;
+  return value;
+};
+
+const parsePageSize = (raw) => {
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 1) return DEFAULT_PAGE_SIZE;
+  return Math.min(value, MAX_PAGE_SIZE);
+};
+
+const parseSort = (raw) => (EXPLORE_SORTS.includes(raw) ? raw : 'new');
+
+const parseQuery = (raw) => {
+  if (typeof raw !== 'string') return '';
+  return raw.trim().slice(0, MAX_QUERY_LENGTH);
+};
+
+const toDeckIdString = (doc) => doc._id.toString();
+
+const toAnonymousExploreDTO = (doc) =>
+  toExploreDeckDTO(doc, { isSubscribed: false, isOwner: false });
+
+const ownerIdOf = (doc) =>
+  doc.owner && doc.owner._id ? doc.owner._id.toString() : null;
+
+const toExploreDecorator = (authUserId, subscribedSet) => (doc) =>
+  toExploreDeckDTO(doc, {
+    isSubscribed: subscribedSet.has(doc._id.toString()),
+    isOwner: ownerIdOf(doc) === authUserId,
+  });
+
+const decorateExploreItems = async (authUser, docs) => {
+  if (!authUser || !authUser.id) return docs.map(toAnonymousExploreDTO);
+  const deckIds = docs.map(toDeckIdString);
+  const subscribedIds = await deckSubscriptionRepository.findSubscribedDeckIds({
+    userId: authUser.id,
+    deckIds,
+  });
+  const subscribedSet = new Set(subscribedIds);
+  return docs.map(toExploreDecorator(authUser.id, subscribedSet));
+};
+
+export async function exploreDecks(authUser, query) {
+  const page = parsePage(query?.page);
+  const pageSize = parsePageSize(query?.pageSize);
+  const sort = parseSort(query?.sort);
+  const q = parseQuery(query?.q);
+  const skip = (page - 1) * pageSize;
+
+  const [docs, total] = await Promise.all([
+    deckRepository.searchPublic({ q, sort, skip, limit: pageSize }),
+    deckRepository.countPublic({ q }),
+  ]);
+
+  const items = await decorateExploreItems(authUser, docs);
+  return { items, total, page, pageSize, sort };
+}
+
+export async function subscribeToDeck(authUser, deckId) {
+  assertAuth(authUser);
+  assertObjectId(deckId, 'deckId');
+  const deck = await loadDeckOr404(deckId);
+  if (deck.visibility === 'private') {
+    throw new DomainError('Deck not found', httpStatus.NOT_FOUND);
+  }
+  if (isOwner(deck, authUser)) {
+    throw new DomainError('Cannot subscribe to your own deck', httpStatus.BAD_REQUEST, {
+      code: 'ownDeck',
+    });
+  }
+  await deckSubscriptionRepository.create({ userId: authUser.id, deckId });
+  return { deckId, subscribed: true };
+}
+
+export async function unsubscribeFromDeck(authUser, deckId) {
+  assertAuth(authUser);
+  assertObjectId(deckId, 'deckId');
+  await deckSubscriptionRepository.deleteOne({ userId: authUser.id, deckId });
+  return { deckId, subscribed: false };
+}
+
+const toSubscriptionDeckId = (sub) => sub.deck.toString();
+
+const toMetaEntry = (doc) => [doc._id.toString(), doc];
+
+const buildDeckMetaMap = (docs) => new Map(docs.map(toMetaEntry));
+
+const toSavedEntry = (deckMap) => (sub) => {
+  const doc = deckMap.get(sub.deck.toString());
+  if (!doc) return null;
+  return toSavedDeckDTO(doc, { subscribedAt: sub.createdAt });
+};
+
+const isPresent = (value) => value !== null;
+
+export async function listSavedDecks(authUser) {
+  assertAuth(authUser);
+  const subscriptions = await deckSubscriptionRepository.listByUser(authUser.id);
+  if (subscriptions.length === 0) return [];
+  const deckIds = subscriptions.map(toSubscriptionDeckId);
+  const docs = await deckRepository.findAccessibleMetaByIds(deckIds);
+  const deckMap = buildDeckMetaMap(docs);
+  return subscriptions.map(toSavedEntry(deckMap)).filter(isPresent);
 }

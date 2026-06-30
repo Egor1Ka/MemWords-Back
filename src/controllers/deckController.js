@@ -49,3 +49,42 @@ export async function remove(req, res) {
     httpResponseError(res, error);
   }
 }
+
+export async function explore(req, res) {
+  try {
+    const result = await deckService.exploreDecks(req.user, req.query ?? {});
+    ok(res, result);
+  } catch (error) {
+    httpResponseError(res, error);
+  }
+}
+
+export async function listSaved(req, res) {
+  try {
+    const result = await deckService.listSavedDecks(req.user);
+    ok(res, result);
+  } catch (error) {
+    httpResponseError(res, error);
+  }
+}
+
+export async function subscribe(req, res) {
+  try {
+    const result = await deckService.subscribeToDeck(req.user, req.params?.deckId);
+    created(res, result);
+  } catch (error) {
+    httpResponseError(res, error);
+  }
+}
+
+export async function unsubscribe(req, res) {
+  try {
+    const result = await deckService.unsubscribeFromDeck(
+      req.user,
+      req.params?.deckId
+    );
+    ok(res, result);
+  } catch (error) {
+    httpResponseError(res, error);
+  }
+}

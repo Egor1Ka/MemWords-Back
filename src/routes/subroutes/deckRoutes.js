@@ -6,12 +6,21 @@ import { requireAuth, optionalAuth } from '../../middleware/auth.js';
 
 const router = Router();
 
+// Discovery / saved — MUST come before "/:deckId" so Express does not treat
+// "explore" / "saved" as a deckId.
+router.get('/explore', optionalAuth, deckController.explore);
+router.get('/saved', requireAuth, deckController.listSaved);
+
 // Decks
 router.post('/', requireAuth, deckController.create);
 router.get('/', requireAuth, deckController.list);
 router.get('/:deckId', optionalAuth, deckController.getById);
 router.patch('/:deckId', requireAuth, deckController.update);
 router.delete('/:deckId', requireAuth, deckController.remove);
+
+// Subscriptions ("add to my library")
+router.post('/:deckId/subscribe', requireAuth, deckController.subscribe);
+router.delete('/:deckId/subscribe', requireAuth, deckController.unsubscribe);
 
 // Cards inside a deck
 router.get('/:deckId/cards', optionalAuth, cardController.listByDeck);
